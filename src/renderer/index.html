@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'"
+    />
+    <title>SteamSaveBackup</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <nav class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">SSB</span>
+          <div>
+            <div class="brand-name">SteamSaveBackup</div>
+            <div class="brand-version" id="appVersion">-</div>
+          </div>
+        </div>
+        <button class="nav-item is-active" data-section="run" type="button">実行</button>
+        <button class="nav-item" data-section="paths" type="button">経路設定</button>
+        <button class="nav-item" data-section="shortcuts" type="button">ショートカット</button>
+        <button class="nav-item" data-section="behavior" type="button">動作設定</button>
+        <button class="nav-item" data-section="snapshots" type="button">スナップショット</button>
+        <button class="nav-item" data-section="log" type="button">ログ</button>
+        <div class="sidebar-foot">
+          <div id="trayHint" class="hint">ウィンドウを閉じても常駐し続けます</div>
+        </div>
+      </nav>
+
+      <main class="content">
+        <!-- ============================================================ 実行 -->
+        <section class="panel is-active" id="section-run">
+          <h1>実行</h1>
+          <p class="lead">
+            グローバルショートカットは他のアプリを操作中でも有効です。トレイメニューからも実行できます。
+          </p>
+
+          <div class="route-list">
+            <div class="route-row">
+              <div class="route-label">経路1</div>
+              <div class="route-path" id="runPath1">未設定</div>
+            </div>
+            <div class="route-row">
+              <div class="route-label">経路2（保存先）</div>
+              <div class="route-path" id="runPath2">未設定</div>
+            </div>
+            <div class="route-row">
+              <div class="route-label">復元元フォルダ</div>
+              <div class="route-path" id="runRestorePath">未設定</div>
+            </div>
+          </div>
+
+          <div class="action-grid">
+            <button class="action-btn primary" id="btnBackup" type="button">
+              <span class="action-title">経路1 → 経路2 にコピー</span>
+              <span class="action-sub" id="btnBackupKey">-</span>
+              <span class="action-note" id="btnBackupNote">yyyymmdd_hhMM フォルダを作って保存</span>
+            </button>
+            <button class="action-btn" id="btnRestore" type="button">
+              <span class="action-title">復元元 → 経路1 にコピー</span>
+              <span class="action-sub" id="btnRestoreKey">-</span>
+              <span class="action-note" id="btnRestoreNote"
+                >日時フォルダを作らず経路1へ強制上書き</span
+              >
+            </button>
+          </div>
+
+          <div class="progress-box" id="progressBox">
+            <div class="progress-head">
+              <span id="progressTitle">待機中</span>
+              <button class="link-btn" id="btnCancel" type="button" disabled>中止</button>
+            </div>
+            <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+            <div class="progress-meta" id="progressMeta">—</div>
+          </div>
+
+          <div class="result-box" id="resultBox">
+            <div class="result-title" id="resultTitle">まだ実行していません</div>
+            <div class="result-detail" id="resultDetail"></div>
+          </div>
+        </section>
+
+        <!-- ======================================================== 経路設定 -->
+        <section class="panel" id="section-paths">
+          <h1>経路設定</h1>
+          <p class="lead">
+            ネットワーク共有も指定できます。Windowsは <code>\\server\share\folder</code>、macOSは
+            <code>/Volumes/share/folder</code> の形式で入力してください。
+          </p>
+
+          <div class="field">
+            <label for="inputPath1">経路1（元データ／セーブデータ側）</label>
+            <div class="path-row">
+              <input type="text" id="inputPath1" spellcheck="false" placeholder="例: /Users/you/Library/Application Support/Game/Saves" />
+              <button class="btn" data-pick="path1" type="button">参照…</button>
+              <button class="btn" data-open="path1" type="button">開く</button>
+            </div>
+            <div class="status" id="statusPath1"></div>
+          </div>
+
+          <div class="field">
+            <label for="inputPath2">経路2（バックアップ保存先）</label>
+            <div class="path-row">
+              <input type="text" id="inputPath2" spellcheck="false" placeholder="例: /Volumes/NAS/SteamSaves" />
+              <button class="btn" data-pick="path2" type="button">参照…</button>
+              <button class="btn" data-open="path2" type="button">開く</button>
+            </div>
+            <div class="status" id="statusPath2"></div>
+          </div>
+
+          <h2>復元元</h2>
+          <p class="lead">
+            復元は「復元元フォルダ」の中身をそのまま経路1へ強制上書きします（日時フォルダは作りません）。
+            「スナップショット」タブの一覧からワンクリックで指定することもできます。
+          </p>
+
+          <div class="field">
+            <label for="inputRestorePath">復元元フォルダ（経路1へ書き戻す元）</label>
+            <div class="path-row">
+              <input type="text" id="inputRestorePath" spellcheck="false" placeholder="例: /Volumes/NAS/SteamSaves/20260909_1905" />
+              <button class="btn" data-pick="restorePath" type="button">参照…</button>
+              <button class="btn" data-open="restorePath" type="button">開く</button>
+            </div>
+            <div class="status" id="statusRestorePath"></div>
+          </div>
+        </section>
+
+        <!-- ==================================================== ショートカット -->
+        <section class="panel" id="section-shortcuts">
+          <h1>ショートカット</h1>
+          <p class="lead">
+            入力欄をクリックしてから、使いたいキーの組み合わせを押してください（修飾キーが1つ以上必要）。
+          </p>
+
+          <div class="field">
+            <label for="keyBackup">経路1 → 経路2 にコピー（バックアップ）</label>
+            <div class="path-row">
+              <input class="key-input" type="text" id="keyBackup" readonly placeholder="クリックしてキーを押す" />
+              <button class="btn" data-resetkey="shortcutBackup" type="button">既定に戻す</button>
+            </div>
+            <div class="status" id="statusKeyBackup"></div>
+          </div>
+
+          <div class="field">
+            <label for="keyRestore">復元元 → 経路1 にコピー（復元）</label>
+            <div class="path-row">
+              <input class="key-input" type="text" id="keyRestore" readonly placeholder="クリックしてキーを押す" />
+              <button class="btn" data-resetkey="shortcutRestore" type="button">既定に戻す</button>
+            </div>
+            <div class="status" id="statusKeyRestore"></div>
+          </div>
+
+          <div class="notice" id="shortcutNotice"></div>
+        </section>
+
+        <!-- ======================================================== 動作設定 -->
+        <section class="panel" id="section-behavior">
+          <h1>動作設定</h1>
+
+          <h2>起動</h2>
+          <label class="check"
+            ><input type="checkbox" data-setting="launchAtLogin" /><span
+              >OSのログイン時に自動で起動する</span
+            ></label
+          >
+          <label class="check"
+            ><input type="checkbox" data-setting="startHidden" /><span
+              >自動起動時はウィンドウを表示せずトレイに常駐する</span
+            ></label
+          >
+          <label class="check mac-only"
+            ><input type="checkbox" data-setting="hideDockIcon" /><span
+              >ウィンドウを閉じている間はDockアイコンを隠す（macOS）</span
+            ></label
+          >
+
+          <h2>コピー動作</h2>
+          <label class="check"
+            ><input type="checkbox" data-setting="useTimestampFolder" /><span
+              >経路2へコピーするとき「yyyymmdd_hhMM」フォルダを作る</span
+            ></label
+          >
+          <label class="check"
+            ><input type="checkbox" data-setting="skipUnchanged" /><span
+              >サイズと更新日時が同じファイルはスキップする（高速化）</span
+            ></label
+          >
+          <label class="check"
+            ><input type="checkbox" data-setting="confirmRestore" /><span
+              >復元元 → 経路1 の実行前に確認ダイアログを出す（強制上書きのため推奨）</span
+            ></label
+          >
+          <label class="check"
+            ><input type="checkbox" data-setting="notifications" /><span
+              >完了・失敗をOS通知で知らせる</span
+            ></label
+          >
+
+          <div class="grid2">
+            <div class="field">
+              <label for="inputKeepSnapshots">スナップショットの保持数（0で無制限）</label>
+              <input type="number" id="inputKeepSnapshots" data-setting="keepSnapshots" min="0" max="9999" />
+            </div>
+            <div class="field">
+              <label for="inputConcurrency">同時コピー数（ネットワーク越しは小さめ推奨）</label>
+              <input type="number" id="inputConcurrency" data-setting="concurrency" min="1" max="16" />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="inputExcludes">除外パターン（改行またはカンマ区切り／<code>*</code> <code>?</code> 使用可）</label>
+            <textarea id="inputExcludes" rows="4" spellcheck="false" placeholder=".DS_Store&#10;Thumbs.db&#10;*.tmp"></textarea>
+          </div>
+
+          <div class="row-end">
+            <button class="btn danger" id="btnResetSettings" type="button">設定を初期値に戻す</button>
+          </div>
+
+          <div class="paths-info">
+            <div>設定ファイル: <span id="settingsPath">-</span></div>
+            <div>ログ: <span id="logPath">-</span></div>
+          </div>
+        </section>
+
+        <!-- =================================================== スナップショット -->
+        <section class="panel" id="section-snapshots">
+          <h1>スナップショット</h1>
+          <p class="lead">
+            経路2の直下にある「yyyymmdd_hhMM」フォルダの一覧です（最大50件）。「復元元にする」を押すと、
+            そのフォルダが復元元フォルダとして設定されます。
+          </p>
+          <div class="row-end">
+            <button class="btn" id="btnReloadSnapshots" type="button">再読み込み</button>
+          </div>
+          <ul class="snapshot-list" id="snapshotList"></ul>
+        </section>
+
+        <!-- ============================================================ ログ -->
+        <section class="panel" id="section-log">
+          <h1>ログ</h1>
+          <div class="row-end">
+            <button class="btn" id="btnOpenLog" type="button">ログファイルを開く</button>
+            <button class="btn" id="btnClearLog" type="button">表示をクリア</button>
+          </div>
+          <ul class="log-list" id="logList"></ul>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <script src="renderer.js"></script>
+  </body>
+</html>

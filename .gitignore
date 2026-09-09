@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/icon.png
+build/tray.png
+build/trayTemplate.png
+build/trayTemplate@2x.png
+.DS_Store
+*.log
+.tmp-smoke/
+shots/

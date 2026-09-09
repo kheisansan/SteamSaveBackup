@@ -1,0 +1,87 @@
+{
+  "name": "steam-save-backup",
+  "productName": "SteamSaveBackup",
+  "version": "1.0.0",
+  "description": "経路1と経路2の間をグローバルショートカットで丸ごとコピーする常駐アプリ",
+  "main": "src/main/main.js",
+  "author": "kei",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "node scripts/run-electron.js .",
+    "icons": "node scripts/generate-icons.js",
+    "test": "node --test \"test/*.test.js\"",
+    "pretest": "node scripts/generate-icons.js",
+    "smoke": "node scripts/run-electron.js test/smoke/entry.js --hidden --user-data-dir=.tmp-smoke",
+    "screenshot": "node scripts/run-electron.js test/smoke/screenshot.js --user-data-dir=.tmp-smoke",
+    "prebuild": "node scripts/generate-icons.js",
+    "build": "electron-builder --mac --win",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.kei.steamsavebackup",
+    "productName": "SteamSaveBackup",
+    "copyright": "Copyright © 2026 kei",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/*.png",
+      "!**/*.map"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "icon": "build/icon.png",
+      "extendInfo": {
+        "LSUIElement": false,
+        "NSAppleEventsUsageDescription": "他アプリ操作中のショートカット受付のために使用します。"
+      }
+    },
+    "dmg": {
+      "title": "SteamSaveBackup ${version}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "SteamSaveBackup"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Utility",
+      "icon": "build/icon.png"
+    }
+  }
+}
