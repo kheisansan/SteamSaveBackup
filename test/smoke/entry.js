@@ -112,6 +112,7 @@ async function run() {
 
   const backup = await win.webContents.executeJavaScript(`(async () => {
     await window.api.updateSettings({
+      gameName: 'Smoke Game',
       path1: ${JSON.stringify(fixture.path1)},
       path2: ${JSON.stringify(fixture.path2)},
       notifications: false,
@@ -122,23 +123,56 @@ async function run() {
   details.backup = {
     ok: backup.ok,
     snapshotName: backup.snapshotName,
+    gameName: backup.gameName,
     copiedFiles: backup.report && backup.report.copiedFiles,
     errorCount: backup.report && backup.report.errorCount,
     message: backup.message,
   };
 
   check(backup.ok === true, `バックアップが失敗: ${backup.message || JSON.stringify(backup.report)}`);
+  check(backup.gameName === 'Smoke Game', `ゲーム名が結果に無い: ${backup.gameName}`);
 
-  // 設定変更後に経路の状態表示が追従しているか
+  // ゲーム追加ボタン経由で2件目を作り、切替できること
+  const games = await win.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.nav-item[data-section="paths"]').click();
+    await new Promise((r) => setTimeout(r, 200));
+    document.getElementById('btnAddGame').click();
+    await new Promise((r) => setTimeout(r, 800));
+    const afterAdd = await window.api.getSettings();
+    const second = afterAdd.settings.games.find((g) => g.id === afterAdd.settings.activeGameId);
+    const first = afterAdd.settings.games.find((g) => g.id !== afterAdd.settings.activeGameId);
+    const back = await window.api.updateSettings({ activeGameId: first.id });
+    return {
+      list: afterAdd.settings.games.map((g) => g.name),
+      addedName: second && second.name,
+      active: back.settings.gameName,
+      count: afterAdd.settings.games.length,
+      selectCount: document.getElementById('selectGamePaths').options.length
+    };
+  })()`);
+  details.games = games;
+  check(games.count === 2, `ゲーム数が想定外: ${games.count}`);
+  check(games.selectCount === 2, `セレクトの件数が想定外: ${games.selectCount}`);
+  check(/^ゲーム\d+$/.test(games.addedName || ''), `追加ゲーム名が想定外: ${games.addedName}`);
+  check(games.active === 'Smoke Game', `切替後のアクティブが想定外: ${games.active}`);
+  check(games.list.includes('Smoke Game'), '元のゲームが一覧に無い');
+
+  // Smoke Game に戻したあと経路表示が追従しているか
+  await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-section="paths"]').click()`);
+  await wait(400);
   const pathStatus = await win.webContents.executeJavaScript(`({
     path1: document.getElementById('statusPath1').textContent,
     path2: document.getElementById('statusPath2').textContent,
-    runPath1: document.getElementById('runPath1').textContent
+    runPath1: document.getElementById('runPath1').textContent,
+    gameName: document.getElementById('inputGameName').value,
+    selectCount: document.getElementById('selectGameRun').options.length
   })`);
   details.pathStatus = pathStatus;
   check(pathStatus.path1.startsWith('OK:'), `経路1の状態表示が未更新: ${pathStatus.path1}`);
   check(pathStatus.path2.startsWith('OK:'), `経路2の状態表示が未更新: ${pathStatus.path2}`);
   check(pathStatus.runPath1 === fixture.path1, '実行タブの経路表示が未更新');
+  check(pathStatus.gameName === 'Smoke Game', `ゲーム名入力が未反映: ${pathStatus.gameName}`);
+  check(pathStatus.selectCount === 2, `ゲーム選択の件数が想定外: ${pathStatus.selectCount}`);
   check(
     /^\d{8}_\d{4}$/.test(backup.snapshotName || ''),
     `スナップショット名が仕様と違う: ${backup.snapshotName}`

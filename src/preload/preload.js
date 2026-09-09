@@ -21,6 +21,11 @@ contextBridge.exposeInMainWorld('api', {
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
   resetSettings: () => ipcRenderer.invoke('settings:reset'),
 
+  addGame: (partial) => ipcRenderer.invoke('game:add', partial),
+  updateGame: (id, patch) => ipcRenderer.invoke('game:update', { id, patch }),
+  removeGame: (gameId) => ipcRenderer.invoke('game:remove', gameId),
+  setActiveGame: (gameId) => ipcRenderer.invoke('game:setActive', gameId),
+
   pickFolder: (options) => ipcRenderer.invoke('dialog:pickFolder', options),
   validatePath: (target) => ipcRenderer.invoke('path:validate', target),
   openPath: (target) => ipcRenderer.invoke('shell:open', target),

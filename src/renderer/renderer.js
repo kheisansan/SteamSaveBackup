@@ -32,6 +32,18 @@ function debounce(key, ms, fn) {
   debounceTimers.set(key, setTimeout(fn, ms));
 }
 
+function cancelDebounce(...keys) {
+  for (const key of keys) {
+    clearTimeout(debounceTimers.get(key));
+    debounceTimers.delete(key);
+  }
+}
+
+/** ゲーム切替時に、別ゲーム向けの遅延保存が飛び込むのを防ぐ。 */
+function cancelGameFieldDebounces() {
+  cancelDebounce('gameName', ...Object.keys(PATH_FIELDS), 'excludes');
+}
+
 let toastTimer = null;
 function toast(message) {
   const el = $('toast');
@@ -67,6 +79,40 @@ function showSection(name) {
 
 // -------------------------------------------------------------------- 反映
 
+function fillGameSelect(selectEl) {
+  if (!selectEl) return;
+  const s = state.settings;
+  const games = s.games || [];
+  const previous = selectEl.value;
+  selectEl.replaceChildren();
+  for (const game of games) {
+    const option = document.createElement('option');
+    option.value = game.id;
+    option.textContent = game.name;
+    selectEl.appendChild(option);
+  }
+  const active = s.activeGameId || (games[0] && games[0].id) || '';
+  selectEl.value = games.some((g) => g.id === active) ? active : previous;
+  if (!selectEl.value && games[0]) selectEl.value = games[0].id;
+}
+
+function renderGames() {
+  const s = state.settings;
+  fillGameSelect($('selectGameRun'));
+  fillGameSelect($('selectGamePaths'));
+
+  const nameInput = $('inputGameName');
+  // 別ゲームへ切り替わったときは、入力中でも名前欄を同期する
+  if (document.activeElement !== nameInput || nameInput.dataset.gameId !== s.activeGameId) {
+    nameInput.value = s.gameName || '';
+  }
+  nameInput.dataset.gameId = s.activeGameId || '';
+
+  $('btnRemoveGame').disabled = (s.games || []).length <= 1 || state.busy;
+  $('selectGameRun').disabled = state.busy;
+  $('selectGamePaths').disabled = state.busy;
+}
+
 function renderPaths() {
   const s = state.settings;
   for (const [key, field] of Object.entries(PATH_FIELDS)) {
@@ -74,6 +120,7 @@ function renderPaths() {
     const input = $(field.input);
     if (document.activeElement !== input) input.value = s[key];
   }
+  renderGames();
 }
 
 async function renderShortcutFields() {
@@ -135,6 +182,10 @@ function setBusy(busy) {
   $('btnBackup').disabled = busy;
   $('btnRestore').disabled = busy;
   $('btnCancel').disabled = !busy;
+  $('btnRemoveGame').disabled = busy || (state.settings.games || []).length <= 1;
+  $('selectGameRun').disabled = busy;
+  $('selectGamePaths').disabled = busy;
+  $('btnAddGame').disabled = busy;
 }
 
 // ---------------------------------------------------------------- 経路の検証
@@ -388,11 +439,87 @@ async function init() {
     btn.addEventListener('click', () => showSection(btn.dataset.section));
   });
 
+  // ---- ゲーム切替・追加・削除・改名
+  // Electron は window.prompt() 非対応なので、追加時は仮名で作って名前欄にフォーカスする
+  function newGameId() {
+    return `g_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function nextGameName(games) {
+    const used = new Set((games || []).map((g) => g.name));
+    let n = (games || []).length + 1;
+    let name = `ゲーム${n}`;
+    while (used.has(name)) {
+      n += 1;
+      name = `ゲーム${n}`;
+    }
+    return name;
+  }
+
+  async function switchGame(gameId) {
+    if (!gameId || gameId === state.settings.activeGameId) return;
+    cancelGameFieldDebounces();
+    await saveSettings({ activeGameId: gameId });
+    renderAll();
+    loadSnapshots();
+    toast(`ゲームを切り替えました: ${state.settings.gameName}`);
+  }
+
+  $('selectGameRun').addEventListener('change', (event) => switchGame(event.target.value));
+  $('selectGamePaths').addEventListener('change', (event) => switchGame(event.target.value));
+
+  $('inputGameName').addEventListener('input', (event) => {
+    const gameId = state.settings.activeGameId;
+    const value = event.target.value;
+    debounce('gameName', 450, async () => {
+      // 切替後に古い入力が別ゲームへ書き込まれるのを防ぐ
+      if (state.settings.activeGameId !== gameId) return;
+      await saveSettings({ gameName: value });
+      renderGames();
+    });
+  });
+
+  $('btnAddGame').addEventListener('click', async () => {
+    cancelGameFieldDebounces();
+    const id = newGameId();
+    const name = nextGameName(state.settings.games);
+    const games = [
+      ...(state.settings.games || []).map((g) => ({ ...g })),
+      { id, name, path1: '', path2: '', restorePath: '' },
+    ];
+    await saveSettings({ games, activeGameId: id });
+    renderAll();
+    loadSnapshots();
+    const nameInput = $('inputGameName');
+    nameInput.focus();
+    nameInput.select();
+    toast(`「${name}」を追加しました。名前を編集してください`);
+  });
+
+  $('btnRemoveGame').addEventListener('click', async () => {
+    const s = state.settings;
+    if ((s.games || []).length <= 1) {
+      toast('最後のゲームは削除できません');
+      return;
+    }
+    const ok = window.confirm(`「${s.gameName}」を削除しますか?\n経路の設定も一緒に消えます。`);
+    if (!ok) return;
+    cancelGameFieldDebounces();
+    const games = (s.games || []).filter((g) => g.id !== s.activeGameId);
+    await saveSettings({ games, activeGameId: games[0].id });
+    renderAll();
+    loadSnapshots();
+    toast(`ゲームを削除しました。現在: ${state.settings.gameName}`);
+  });
+
   // ---- 経路
   for (const [key, field] of Object.entries(PATH_FIELDS)) {
     $(field.input).addEventListener('input', (event) => {
+      const gameId = state.settings.activeGameId;
+      const value = event.target.value;
       debounce(key, 450, async () => {
-        await saveSettings({ [key]: event.target.value });
+        if (state.settings.activeGameId !== gameId) return;
+        await saveSettings({ [key]: value });
         renderPaths();
         validatePathField(key);
       });

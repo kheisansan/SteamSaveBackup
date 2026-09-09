@@ -150,6 +150,7 @@ async function confirmRestore() {
 
   if (process.platform === 'darwin') app.focus({ steal: true });
 
+  const gameLine = s.gameName ? `ゲーム: ${s.gameName}\n` : '';
   const { response } = await dialog.showMessageBox({
     type: 'warning',
     buttons: ['復元する', 'キャンセル'],
@@ -158,7 +159,7 @@ async function confirmRestore() {
     title: '復元の確認',
     message: '復元元フォルダ → 経路1 へコピーします。よろしいですか?',
     detail:
-      `コピー元: ${s.restorePath}\nコピー先: ${s.path1}\n\n` +
+      `${gameLine}コピー元: ${s.restorePath}\nコピー先: ${s.path1}\n\n` +
       '日時フォルダは作らず、経路1の同名ファイルを強制的に上書きします。',
     noLink: true,
   });
@@ -290,8 +291,29 @@ function updateTray() {
   if (!tray) return;
   const s = settings();
   const busy = runner.busy;
+  const gameLabel = s.gameName || '未設定';
+
+  const gameMenu = (s.games || []).map((game) => ({
+    label: game.name,
+    type: 'radio',
+    checked: game.id === s.activeGameId,
+    enabled: !busy,
+    click: () => {
+      try {
+        const after = store.setActiveGame(game.id);
+        updateTray();
+        sendToWindow('settings:changed', after);
+        logEntry('info', `ゲームを切り替えました: ${game.name}`);
+      } catch (err) {
+        logEntry('error', 'ゲームの切り替えに失敗しました。', err.message);
+      }
+    },
+  }));
 
   const menu = Menu.buildFromTemplate([
+    { label: `現在のゲーム: ${gameLabel}`, enabled: false },
+    { label: 'ゲームを切り替え', submenu: gameMenu.length > 0 ? gameMenu : [{ label: '(なし)', enabled: false }] },
+    { type: 'separator' },
     {
       label: `経路1 → 経路2 にコピー   ${formatAccelerator(s.shortcutBackup)}`,
       enabled: !busy,
@@ -327,7 +349,9 @@ function updateTray() {
 
   tray.setContextMenu(menu);
   tray.setToolTip(
-    busy ? `SteamSaveBackup: ${DIRECTION_LABEL[runner.current]} 実行中` : 'SteamSaveBackup'
+    busy
+      ? `SteamSaveBackup: ${DIRECTION_LABEL[runner.current]} 実行中 (${gameLabel})`
+      : `SteamSaveBackup — ${gameLabel}`
   );
 }
 
@@ -472,6 +496,7 @@ function registerIpc() {
     }
     if (before.hideDockIcon !== after.hideDockIcon) applyDockVisibility();
 
+    // ゲーム切替・追加・削除でもトレイ表示を更新する
     updateTray();
     sendToWindow('settings:changed', after);
     return { settings: after, shortcuts: shortcutState };
@@ -485,6 +510,52 @@ function registerIpc() {
     sendToWindow('settings:changed', next);
     logEntry('info', '設定を初期値に戻しました。');
     return { settings: next, shortcuts: shortcutState };
+  });
+
+  const publishSettings = (after, message) => {
+    updateTray();
+    sendToWindow('settings:changed', after);
+    if (message) logEntry('info', message);
+    return { settings: after, shortcuts: shortcutState };
+  };
+
+  ipcMain.handle('games:add', (_event, partial) => {
+    try {
+      const after = store.addGame(partial || {});
+      return publishSettings(after, `ゲームを追加しました: ${after.gameName}`);
+    } catch (err) {
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('game:update', (_event, { id, patch } = {}) => {
+    try {
+      if (!id) throw new Error('ゲームIDが指定されていません。');
+      const after = store.updateGame(id, patch || {});
+      return publishSettings(after);
+    } catch (err) {
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('game:remove', (_event, gameId) => {
+    try {
+      const before = settings();
+      const target = (before.games || []).find((g) => g.id === gameId);
+      const after = store.removeGame(gameId);
+      return publishSettings(after, target ? `ゲームを削除しました: ${target.name}` : 'ゲームを削除しました。');
+    } catch (err) {
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('game:setActive', (_event, gameId) => {
+    try {
+      const after = store.setActiveGame(gameId);
+      return publishSettings(after, `ゲームを切り替えました: ${after.gameName}`);
+    } catch (err) {
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
   });
 
   ipcMain.handle('dialog:pickFolder', async (_event, { current, title } = {}) => {

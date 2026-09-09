@@ -114,13 +114,19 @@ class JobRunner extends EventEmitter {
     this.controller = new AbortController();
 
     const startedAt = new Date();
+    const gameName = settings.gameName || '';
+    const label = gameName
+      ? `${DIRECTION_LABEL[direction]} [${gameName}]`
+      : DIRECTION_LABEL[direction];
     let endpoints = null;
     try {
       endpoints = await resolveEndpoints(direction, settings);
 
       this.emit('start', {
         direction,
-        label: DIRECTION_LABEL[direction],
+        label,
+        gameName,
+        gameId: settings.gameId || '',
         src: endpoints.src,
         dest: endpoints.dest,
         snapshotName: endpoints.snapshotName,
@@ -151,7 +157,9 @@ class JobRunner extends EventEmitter {
       const result = {
         ok: !report.canceled && !report.fatal && report.errorCount === 0,
         direction,
-        label: DIRECTION_LABEL[direction],
+        label,
+        gameName,
+        gameId: settings.gameId || '',
         src: endpoints.src,
         dest: endpoints.dest,
         snapshotName: endpoints.snapshotName,
@@ -167,7 +175,9 @@ class JobRunner extends EventEmitter {
       const result = {
         ok: false,
         direction,
-        label: DIRECTION_LABEL[direction],
+        label,
+        gameName,
+        gameId: settings.gameId || '',
         src: endpoints ? endpoints.src : direction === 'restore' ? settings.restorePath : settings.path1,
         dest: endpoints ? endpoints.dest : direction === 'restore' ? settings.path1 : settings.path2,
         trigger,
