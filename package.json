@@ -1,8 +1,8 @@
 {
   "name": "steam-save-backup",
   "productName": "SteamSaveBackup",
-  "version": "1.0.0",
-  "description": "経路1と経路2の間をグローバルショートカットで丸ごとコピーする常駐アプリ",
+  "version": "1.1.0",
+  "description": "ゲーム別に経路を設定し、グローバルショートカットでセーブデータを丸ごとコピーする常駐アプリ",
   "main": "src/main/main.js",
   "author": "kei",
   "license": "MIT",

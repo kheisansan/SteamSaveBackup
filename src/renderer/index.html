@@ -38,6 +38,11 @@
             グローバルショートカットは他のアプリを操作中でも有効です。トレイメニューからも実行できます。
           </p>
 
+          <div class="game-bar">
+            <label for="selectGameRun">ゲーム</label>
+            <select id="selectGameRun"></select>
+          </div>
+
           <div class="route-list">
             <div class="route-row">
               <div class="route-label">経路1</div>
@@ -87,9 +92,27 @@
         <section class="panel" id="section-paths">
           <h1>経路設定</h1>
           <p class="lead">
-            ネットワーク共有も指定できます。Windowsは <code>\\server\share\folder</code>、macOSは
-            <code>/Volumes/share/folder</code> の形式で入力してください。
+            ゲームごとに経路1・経路2・復元元フォルダを保存できます。ネットワーク共有も指定できます（Windowsは
+            <code>\\server\share\folder</code>、macOSは <code>/Volumes/share/folder</code>）。
           </p>
+
+          <div class="game-editor">
+            <div class="field">
+              <label for="selectGamePaths">編集するゲーム</label>
+              <div class="path-row">
+                <select id="selectGamePaths"></select>
+                <button class="btn" id="btnAddGame" type="button">追加</button>
+                <button class="btn danger" id="btnRemoveGame" type="button">削除</button>
+              </div>
+              <div class="status">「追加」で新しいゲームを作り、下の名前欄で改名できます。</div>
+            </div>
+            <div class="field">
+              <label for="inputGameName">ゲーム名</label>
+              <div class="path-row">
+                <input type="text" id="inputGameName" spellcheck="false" placeholder="例: Elden Ring" />
+              </div>
+            </div>
+          </div>
 
           <div class="field">
             <label for="inputPath1">経路1（元データ／セーブデータ側）</label>
