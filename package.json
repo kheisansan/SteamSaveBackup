@@ -32,12 +32,15 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "afterPack": "scripts/afterPack.js",
     "files": [
       "src/**/*",
       "build/*.png",
       "!**/*.map"
     ],
     "mac": {
+      "identity": null,
+      "gatekeeperAssess": false,
       "category": "public.app-category.utilities",
       "target": [
         {
