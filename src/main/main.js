@@ -24,8 +24,8 @@ const {
   shell,
 } = require('electron');
 
-const { SettingsStore, defaultSettings } = require('../core/settings');
-const { JobRunner, DIRECTION_LABEL } = require('../core/jobs');
+const { SettingsStore, defaultSettings, settingsForGame, listPinnedGames, listPinnedGroups } = require('../core/settings');
+const { JobRunner, DIRECTION_LABEL, inspectJobSetup } = require('../core/jobs');
 const {
   acceleratorFromKeyEvent,
   formatAccelerator,
@@ -37,6 +37,7 @@ const { normalizeInputPath } = require('../core/pathcheck');
 const { History } = require('./history');
 
 const ROOT_DIR = path.join(__dirname, '..', '..');
+const APP_PACKAGE = require(path.join(ROOT_DIR, 'package.json'));
 const HIDDEN_FLAG = '--hidden';
 
 let store = null;
@@ -45,7 +46,7 @@ let runner = null;
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
-let shortcutState = { backup: { ok: false }, restore: { ok: false } };
+let shortcutState = { byGameId: {} };
 
 // ------------------------------------------------------------------ utilities
 
@@ -57,6 +58,27 @@ function sendToWindow(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
   }
+}
+
+function isWindowVisible() {
+  return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible());
+}
+
+function revealWindow(section) {
+  if (section) {
+    showWindow(section);
+    return;
+  }
+  if (!isWindowVisible()) showWindow();
+}
+
+/** アプリ内トースト＋OS通知。section があればそのタブへ切り替える。 */
+function noticeUi(message, { title = 'SteamSaveBackup', section = '', kind = 'error', logLevel } = {}) {
+  const level = logLevel || (kind === 'error' ? 'error' : 'warn');
+  logEntry(level, message);
+  notify(title, message);
+  revealWindow(section);
+  sendToWindow('ui:notice', { kind, message, section });
 }
 
 function logEntry(level, text, detail = '') {
@@ -94,9 +116,9 @@ function windowIcon() {
 
 function createWindow({ show }) {
   mainWindow = new BrowserWindow({
-    width: 940,
+    width: 1180,
     height: 780,
-    minWidth: 720,
+    minWidth: 880,
     minHeight: 560,
     show: false,
     title: 'SteamSaveBackup',
@@ -145,9 +167,7 @@ function showWindow(section = null) {
 
 // ---------------------------------------------------------------- job trigger
 
-async function confirmRestore() {
-  const s = settings();
-
+async function confirmRestore(s) {
   if (process.platform === 'darwin') app.focus({ steal: true });
 
   const gameLine = s.gameName ? `ゲーム: ${s.gameName}\n` : '';
@@ -157,105 +177,133 @@ async function confirmRestore() {
     defaultId: 0,
     cancelId: 1,
     title: '復元の確認',
-    message: '復元元フォルダ → 経路1 へコピーします。よろしいですか?',
+    message: '復元元フォルダ → コピー元 へコピーします。よろしいですか?',
     detail:
       `${gameLine}コピー元: ${s.restorePath}\nコピー先: ${s.path1}\n\n` +
-      '日時フォルダは作らず、経路1の同名ファイルを強制的に上書きします。',
+      '日時フォルダは作らず、コピー元の同名ファイルを強制的に上書きします。',
     noLink: true,
   });
   return response === 0;
 }
 
-/** 方向ごとに必要な経路が揃っているか確認する。 */
-function missingPathMessage(direction, s) {
-  if (direction === 'backup') {
-    if (!s.path1) return '経路1を設定してください。';
-    if (!s.path2) return '経路2を設定してください。';
-    return null;
-  }
-  if (!s.restorePath) return '復元元フォルダを設定してください。';
-  if (!s.path1) return '経路1を設定してください。';
-  return null;
+function resolveJobSettings(gameId) {
+  const all = settings();
+  if (!gameId) return all;
+  const found = (all.games || []).some((g) => g.id === gameId);
+  if (!found) return null;
+  return settingsForGame(all, gameId);
 }
 
-async function trigger(direction, source = 'manual') {
-  const s = settings();
-  const missing = missingPathMessage(direction, s);
-  if (missing) {
-    logEntry('warn', missing);
-    notify('SteamSaveBackup', missing);
-    showWindow('paths');
-    return { ok: false, message: missing };
+function reportSetupError(message, { direction, gameName } = {}) {
+  logEntry('error', message);
+  notify('経路を確認してください', message);
+  showWindow('paths');
+  sendToWindow('ui:notice', { kind: 'error', message, section: 'paths' });
+  sendToWindow('job:done', {
+    ok: false,
+    direction: direction || '',
+    label: DIRECTION_LABEL[direction] || '実行',
+    gameName: gameName || '',
+    message,
+    summary: message,
+    report: {},
+  });
+  return { ok: false, message, setupError: true };
+}
+
+async function trigger(direction, source = 'manual', gameId = null) {
+  const s = resolveJobSettings(gameId);
+  if (!s || (gameId && !(s.games || []).some((g) => g.id === gameId))) {
+    const message = '指定されたゲームが見つかりません。';
+    noticeUi(message, { title: '実行できません' });
+    return { ok: false, message };
   }
+  const setupError = inspectJobSetup(direction, s);
+  if (setupError) return reportSetupError(setupError, { direction, gameName: s.gameName });
 
   if (runner.busy) {
     const message = `実行中です(${DIRECTION_LABEL[runner.current]})。完了までお待ちください。`;
-    logEntry('warn', message);
-    notify('SteamSaveBackup', message);
+    noticeUi(message, { title: '実行中です', section: 'run', kind: 'error', logLevel: 'warn' });
     return { ok: false, message };
   }
 
   if (direction === 'restore' && s.confirmRestore) {
-    const approved = await confirmRestore();
+    const approved = await confirmRestore(s);
     if (!approved) {
       logEntry('info', '復元をキャンセルしました。');
       return { ok: false, canceled: true, message: '復元をキャンセルしました。' };
     }
   }
 
-  return runner.run(direction, { trigger: source });
+  if (gameId && gameId !== settings().activeGameId) {
+    try {
+      store.setActiveGame(gameId);
+      sendToWindow('settings:changed', settings());
+      updateTray();
+    } catch {
+      /* 実行は渡した設定で進める */
+    }
+  }
+
+  return runner.run(direction, { trigger: source, settings: s });
 }
 
 // ------------------------------------------------------------------ shortcuts
 
+function registerOneShortcut(game, direction, accelerator, seen) {
+  if (!accelerator) {
+    return { ok: true, accelerator: '', skipped: true };
+  }
+  const check = validateAccelerator(accelerator);
+  if (!check.ok) return { ok: false, accelerator, error: check.error };
+  const dupKey = accelerator.toLowerCase();
+  if (seen.has(dupKey)) {
+    return { ok: false, accelerator, error: '同じショートカットが重複しています。' };
+  }
+  try {
+    const ok = globalShortcut.register(accelerator, () => {
+      trigger(direction, 'shortcut', game.id);
+    });
+    if (ok) seen.set(dupKey, `${game.id}:${direction}`);
+    return ok
+      ? { ok: true, accelerator }
+      : { ok: false, accelerator, error: 'OSまたは他アプリに使用されているため登録できません。' };
+  } catch (err) {
+    return { ok: false, accelerator, error: err.message };
+  }
+}
+
 function registerShortcuts() {
   globalShortcut.unregisterAll();
   const s = settings();
-  const state = {};
+  const byGameId = {};
   const seen = new Map();
 
-  const entries = [
-    ['backup', s.shortcutBackup],
-    ['restore', s.shortcutRestore],
-  ];
-
-  for (const [key, accelerator] of entries) {
-    const check = validateAccelerator(accelerator);
-    if (!check.ok) {
-      state[key] = { ok: false, accelerator, error: check.error };
-      continue;
-    }
-    const dupKey = accelerator.toLowerCase();
-    if (seen.has(dupKey)) {
-      state[key] = { ok: false, accelerator, error: '同じショートカットが重複しています。' };
-      continue;
-    }
-    try {
-      const ok = globalShortcut.register(accelerator, () => {
-        trigger(key, 'shortcut');
-      });
-      state[key] = ok
-        ? { ok: true, accelerator }
-        : { ok: false, accelerator, error: 'OSまたは他アプリに使用されているため登録できません。' };
-      if (ok) seen.set(dupKey, key);
-    } catch (err) {
-      state[key] = { ok: false, accelerator, error: err.message };
-    }
+  for (const game of s.games || []) {
+    const backup = registerOneShortcut(game, 'backup', game.shortcutBackup || '', seen);
+    const restore = registerOneShortcut(game, 'restore', game.shortcutRestore || '', seen);
+    byGameId[game.id] = { backup, restore };
   }
 
-  shortcutState = state;
-  for (const [key, value] of Object.entries(state)) {
-    if (!value.ok) {
+  shortcutState = { byGameId };
+  for (const [gameId, value] of Object.entries(byGameId)) {
+    const game = (s.games || []).find((g) => g.id === gameId);
+    const name = game ? game.name || '(無題)' : gameId;
+    for (const [kind, entry] of [
+      ['バックアップ', value.backup],
+      ['復元', value.restore],
+    ]) {
+      if (!entry || entry.skipped || entry.ok) continue;
       logEntry(
         'error',
-        `ショートカット登録に失敗: ${DIRECTION_LABEL[key]} (${formatAccelerator(value.accelerator)})`,
-        value.error
+        `ショートカット登録に失敗: ${name} / ${kind} (${formatAccelerator(entry.accelerator)})`,
+        entry.error
       );
     }
   }
-  sendToWindow('shortcuts:state', state);
+  sendToWindow('shortcuts:state', shortcutState);
   updateTray();
-  return state;
+  return shortcutState;
 }
 
 // ----------------------------------------------------------------- login item
@@ -275,6 +323,10 @@ function applyLoginItem({ force = false } = {}) {
     app.setLoginItemSettings(options);
   } catch (err) {
     logEntry('error', 'ログイン時起動の設定に失敗しました。', err.message);
+    sendToWindow('ui:notice', {
+      kind: 'error',
+      message: `ログイン時起動の設定に失敗しました。${err.message}`,
+    });
   }
 }
 
@@ -291,57 +343,40 @@ function updateTray() {
   if (!tray) return;
   const s = settings();
   const busy = runner.busy;
-  const gameLabel = s.gameName || '未設定';
+  const pinnedGroups = listPinnedGroups(s);
+  const listed = listPinnedGames(s);
+  const gameLabel = listed.length === 1 ? listed[0].name || '未設定' : `${listed.length} 件`;
 
-  const gameMenu = (s.games || []).map((game) => ({
-    label: game.name,
-    type: 'radio',
-    checked: game.id === s.activeGameId,
-    enabled: !busy,
-    click: () => {
-      try {
-        const after = store.setActiveGame(game.id);
-        updateTray();
-        sendToWindow('settings:changed', after);
-        logEntry('info', `ゲームを切り替えました: ${game.name}`);
-      } catch (err) {
-        logEntry('error', 'ゲームの切り替えに失敗しました。', err.message);
-      }
-    },
-  }));
+  const gameMenus = [];
+  for (const group of pinnedGroups) {
+    const items = (s.games || []).filter((g) => g.pinned && g.groupId === group.id);
+    for (const game of items) {
+      const backupSc = game.shortcutBackup ? `   ${formatAccelerator(game.shortcutBackup)}` : '';
+      const restoreSc = game.shortcutRestore ? `   ${formatAccelerator(game.shortcutRestore)}` : '';
+      const prefix = group.name ? `${group.name} / ` : '';
+      gameMenus.push({
+        label: `${prefix}${game.name || '(無題)'}`,
+        submenu: [
+          {
+            label: `バックアップ${backupSc}`,
+            enabled: !busy,
+            click: () => trigger('backup', 'tray', game.id),
+          },
+          {
+            label: `復元${restoreSc}`,
+            enabled: !busy,
+            click: () => trigger('restore', 'tray', game.id),
+          },
+        ],
+      });
+    }
+  }
 
   const menu = Menu.buildFromTemplate([
-    { label: `現在のゲーム: ${gameLabel}`, enabled: false },
-    { label: 'ゲームを切り替え', submenu: gameMenu.length > 0 ? gameMenu : [{ label: '(なし)', enabled: false }] },
-    { type: 'separator' },
-    {
-      label: `経路1 → 経路2 にコピー   ${formatAccelerator(s.shortcutBackup)}`,
-      enabled: !busy,
-      click: () => trigger('backup', 'tray'),
-    },
-    {
-      label: `復元元 → 経路1 にコピー   ${formatAccelerator(s.shortcutRestore)}`,
-      enabled: !busy,
-      click: () => trigger('restore', 'tray'),
-    },
+    { label: listed.length > 0 ? `ピン留め: ${gameLabel}` : 'ピン留めされた経路はありません', enabled: false },
+    ...(gameMenus.length > 0 ? gameMenus : []),
     { type: 'separator' },
     { label: '実行中の処理を中止', enabled: busy, click: () => runner.cancel() },
-    { type: 'separator' },
-    {
-      label: '経路1をファイラで開く',
-      enabled: Boolean(s.path1),
-      click: () => shell.openPath(s.path1),
-    },
-    {
-      label: '経路2をファイラで開く',
-      enabled: Boolean(s.path2),
-      click: () => shell.openPath(s.path2),
-    },
-    {
-      label: '復元元フォルダをファイラで開く',
-      enabled: Boolean(s.restorePath),
-      click: () => shell.openPath(s.restorePath),
-    },
     { type: 'separator' },
     { label: '環境設定を開く…', click: () => showWindow('paths') },
     { label: 'SteamSaveBackup を終了', click: () => quitApp() },
@@ -350,8 +385,8 @@ function updateTray() {
   tray.setContextMenu(menu);
   tray.setToolTip(
     busy
-      ? `SteamSaveBackup: ${DIRECTION_LABEL[runner.current]} 実行中 (${gameLabel})`
-      : `SteamSaveBackup — ${gameLabel}`
+      ? `SteamSaveBackup: ${DIRECTION_LABEL[runner.current]} 実行中`
+      : 'SteamSaveBackup'
   );
 }
 
@@ -375,12 +410,12 @@ function buildAppMenu() {
     label: '実行',
     submenu: [
       {
-        label: '経路1 → 経路2 にコピー',
+        label: 'コピー元 → バックアップ先にコピー',
         accelerator: 'CmdOrCtrl+1',
         click: () => trigger('backup', 'menu'),
       },
       {
-        label: '復元元 → 経路1 にコピー',
+        label: '復元元 → コピー元にコピー',
         accelerator: 'CmdOrCtrl+2',
         click: () => trigger('restore', 'menu'),
       },
@@ -459,11 +494,15 @@ function quitApp() {
   app.quit();
 }
 
+function gamesShortcutFingerprint(s) {
+  return (s.games || []).map((g) => `${g.id}:${g.shortcutBackup || ''}:${g.shortcutRestore || ''}`).join('|');
+}
+
 // ------------------------------------------------------------------------ IPC
 
 function registerIpc() {
   ipcMain.handle('app:info', () => ({
-    version: app.getVersion(),
+    version: APP_PACKAGE.version,
     electron: process.versions.electron,
     platform: process.platform,
     settingsPath: store.filePath,
@@ -479,27 +518,29 @@ function registerIpc() {
   }));
 
   ipcMain.handle('settings:update', (_event, patch) => {
-    const before = settings();
-    const after = store.update(patch || {});
+    try {
+      const before = settings();
+      const after = store.update(patch || {});
 
-    if (
-      before.shortcutBackup !== after.shortcutBackup ||
-      before.shortcutRestore !== after.shortcutRestore
-    ) {
-      registerShortcuts();
-    }
-    if (
-      before.launchAtLogin !== after.launchAtLogin ||
-      before.startHidden !== after.startHidden
-    ) {
-      applyLoginItem({ force: true });
-    }
-    if (before.hideDockIcon !== after.hideDockIcon) applyDockVisibility();
+      if (gamesShortcutFingerprint(before) !== gamesShortcutFingerprint(after)) {
+        registerShortcuts();
+      }
+      if (
+        before.launchAtLogin !== after.launchAtLogin ||
+        before.startHidden !== after.startHidden
+      ) {
+        applyLoginItem({ force: true });
+      }
+      if (before.hideDockIcon !== after.hideDockIcon) applyDockVisibility();
 
-    // ゲーム切替・追加・削除でもトレイ表示を更新する
-    updateTray();
-    sendToWindow('settings:changed', after);
-    return { settings: after, shortcuts: shortcutState };
+      updateTray();
+      sendToWindow('settings:changed', after);
+      return { settings: after, shortcuts: shortcutState };
+    } catch (err) {
+      logEntry('error', '設定の保存に失敗しました。', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: `設定の保存に失敗しました。${err.message}` });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
   });
 
   ipcMain.handle('settings:reset', () => {
@@ -513,17 +554,20 @@ function registerIpc() {
   });
 
   const publishSettings = (after, message) => {
+    registerShortcuts();
     updateTray();
     sendToWindow('settings:changed', after);
     if (message) logEntry('info', message);
     return { settings: after, shortcuts: shortcutState };
   };
 
-  ipcMain.handle('games:add', (_event, partial) => {
+  ipcMain.handle('game:add', (_event, partial) => {
     try {
       const after = store.addGame(partial || {});
-      return publishSettings(after, `ゲームを追加しました: ${after.gameName}`);
+      return publishSettings(after, after.gameName ? `ゲームを追加しました: ${after.gameName}` : '');
     } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
       return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
     }
   });
@@ -534,6 +578,8 @@ function registerIpc() {
       const after = store.updateGame(id, patch || {});
       return publishSettings(after);
     } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
       return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
     }
   });
@@ -545,6 +591,8 @@ function registerIpc() {
       const after = store.removeGame(gameId);
       return publishSettings(after, target ? `ゲームを削除しました: ${target.name}` : 'ゲームを削除しました。');
     } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
       return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
     }
   });
@@ -554,6 +602,91 @@ function registerIpc() {
       const after = store.setActiveGame(gameId);
       return publishSettings(after, `ゲームを切り替えました: ${after.gameName}`);
     } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('game:reorder', (_event, payload) => {
+    try {
+      const orderedIds = Array.isArray(payload) ? payload : (payload && payload.orderedIds) || [];
+      const groupId = Array.isArray(payload) ? undefined : payload && payload.groupId;
+      const after = store.reorderGames(orderedIds, groupId);
+      return publishSettings(after);
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('game:duplicate', (_event, gameId) => {
+    try {
+      const after = store.duplicateGame(gameId);
+      return publishSettings(after, after.gameName ? `経路をコピーしました: ${after.gameName}` : '経路をコピーしました。');
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('game:move', (_event, { gameId, groupId, beforeId } = {}) => {
+    try {
+      if (!gameId) throw new Error('ゲームIDが指定されていません。');
+      const after = store.moveGame(gameId, groupId, beforeId || '');
+      return publishSettings(after);
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('group:add', (_event, partial) => {
+    try {
+      const after = store.addGroup(partial || {});
+      return publishSettings(after, `グループを追加しました: ${after.groups[after.groups.length - 1].name}`);
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('group:update', (_event, { id, patch } = {}) => {
+    try {
+      if (!id) throw new Error('グループIDが指定されていません。');
+      const after = store.updateGroup(id, patch || {});
+      return publishSettings(after);
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('group:remove', (_event, groupId) => {
+    try {
+      const before = settings();
+      const target = (before.groups || []).find((g) => g.id === groupId);
+      const after = store.removeGroup(groupId);
+      return publishSettings(after, target ? `グループを削除しました: ${target.name}` : 'グループを削除しました。');
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
+      return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
+    }
+  });
+
+  ipcMain.handle('group:reorder', (_event, orderedIds) => {
+    try {
+      const after = store.reorderGroups(orderedIds || []);
+      return publishSettings(after);
+    } catch (err) {
+      logEntry('error', err.message);
+      sendToWindow('ui:notice', { kind: 'error', message: err.message });
       return { ok: false, error: err.message, settings: settings(), shortcuts: shortcutState };
     }
   });
@@ -593,16 +726,21 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('job:run', (_event, direction) => trigger(direction, 'ui'));
+  ipcMain.handle('job:run', (_event, payload) => {
+    if (payload && typeof payload === 'object') {
+      return trigger(payload.direction, 'ui', payload.gameId || null);
+    }
+    return trigger(payload, 'ui');
+  });
   ipcMain.handle('job:cancel', () => {
     runner.cancel();
     return true;
   });
   ipcMain.handle('job:status', () => ({ busy: runner.busy, current: runner.current }));
 
-  ipcMain.handle('snapshots:list', async () => {
-    const s = settings();
-    if (!s.path2) return [];
+  ipcMain.handle('snapshots:list', async (_event, gameId) => {
+    const s = gameId ? resolveJobSettings(gameId) : settings();
+    if (!s || !s.path2) return [];
     const names = await listSnapshots(s.path2);
     return names.slice(0, 50).map((name) => ({
       name,
@@ -647,10 +785,20 @@ function registerIpc() {
   ipcMain.handle('shell:open', async (_event, target) => {
     const normalized = normalizeInputPath(target);
     if (!normalized) return 'パスが未設定です。';
-    return shell.openPath(normalized);
+    try {
+      return (await shell.openPath(normalized)) || '';
+    } catch (err) {
+      return err.message || 'フォルダを開けませんでした。';
+    }
   });
 
-  ipcMain.handle('shell:openLog', () => shell.openPath(history.logPath));
+  ipcMain.handle('shell:openLog', async () => {
+    try {
+      return (await shell.openPath(history.logPath)) || '';
+    } catch (err) {
+      return err.message || 'ログファイルを開けませんでした。';
+    }
+  });
 }
 
 // -------------------------------------------------------------- job listeners
@@ -698,6 +846,10 @@ function bindRunnerEvents() {
       result.ok ? `完了: ${result.label}` : `注意: ${result.label}`,
       `${summary}\n${result.dest}`
     );
+    if (!result.ok && !(result.report && result.report.canceled)) {
+      revealWindow();
+      sendToWindow('ui:notice', { kind: 'error', message: summary, section: '' });
+    }
   });
 
   runner.on('failed', (result) => {
@@ -705,6 +857,22 @@ function bindRunnerEvents() {
     sendToWindow('job:done', { ...result, summary: result.message });
     logEntry('error', `失敗: ${result.label}`, result.message);
     notify(`失敗: ${result.label}`, result.message);
+    if (result.setupError) {
+      showWindow('paths');
+      sendToWindow('ui:notice', { kind: 'error', message: result.message, section: 'paths' });
+    } else {
+      revealWindow('run');
+      sendToWindow('ui:notice', { kind: 'error', message: result.message, section: 'run' });
+    }
+  });
+
+  runner.on('rejected', (result) => {
+    noticeUi(result.message || '実行中です。完了までお待ちください。', {
+      title: '実行中です',
+      section: 'run',
+      kind: 'error',
+      logLevel: 'warn',
+    });
   });
 }
 
@@ -747,7 +915,10 @@ if (!gotLock) {
     registerShortcuts();
     applyLoginItem();
 
-    logEntry('info', `起動しました (v${app.getVersion()} / ${process.platform})`);
+    if (store.loadError) {
+      logEntry('warn', '設定ファイルが壊れていたため初期値で起動しました。', store.loadError);
+    }
+    logEntry('info', `起動しました (v${APP_PACKAGE.version} / ${process.platform})`);
 
     app.on('activate', () => showWindow());
   });

@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { JobRunner } = require('../src/core/jobs');
+const { JobRunner, inspectJobSetup } = require('../src/core/jobs');
 const { defaultSettings } = require('../src/core/settings');
 const { listSnapshots } = require('../src/core/snapshots');
 const { makeTmpDir, writeTree, readTree, listDirs } = require('./helpers');
@@ -156,6 +156,7 @@ test('経路が未設定なら失敗する', async () => {
   const result = await runner.run('backup');
 
   assert.equal(result.ok, false);
+  assert.equal(result.setupError, true);
   assert.match(result.message, /コピー先の経路が未設定/);
 });
 
@@ -166,6 +167,7 @@ test('経路1が存在しないと失敗する', async () => {
   const result = await runner.run('backup');
 
   assert.equal(result.ok, false);
+  assert.equal(result.setupError, true);
   assert.match(result.message, /見つかりません/);
 });
 
@@ -182,6 +184,22 @@ test('経路2が経路1の配下だと拒否する', async () => {
 
   assert.equal(result.ok, false);
   assert.match(result.message, /配下/);
+});
+
+test('inspectJobSetup は未設定と存在しない経路を説明する', () => {
+  assert.equal(inspectJobSetup('backup', { path1: '', path2: '/tmp/b' }), 'コピー元を設定してください。');
+  assert.equal(inspectJobSetup('backup', { path1: '/tmp/a', path2: '' }), 'バックアップ先を設定してください。');
+  assert.equal(inspectJobSetup('restore', { path1: '/tmp/a', restorePath: '' }), '復元元フォルダを設定してください。');
+
+  const missing = path.join(makeTmpDir(), 'nope');
+  const backupMissing = inspectJobSetup('backup', { path1: missing, path2: makeTmpDir() });
+  assert.match(backupMissing, /コピー元が見つかりません/);
+
+  const { path1, path2 } = makeCase();
+  assert.equal(inspectJobSetup('backup', { path1, path2 }), null);
+
+  const restoreMissing = inspectJobSetup('restore', { path1, restorePath: missing });
+  assert.match(restoreMissing, /見つかりません/);
 });
 
 test('実行中の多重起動は拒否される', async () => {
@@ -243,4 +261,23 @@ test('不明な direction は失敗する', async () => {
   const result = await runner.run('sideways');
   assert.equal(result.ok, false);
   assert.match(result.message, /不明な方向指定/);
+});
+
+test('run に渡した settings を getSettings より優先する', async () => {
+  const { path1, path2, runner } = makeCase();
+  const other = writeTree(path.join(makeTmpDir(), 'other'), { 'other.dat': 'x' });
+  const result = await runner.run('backup', {
+    settings: {
+      ...defaultSettings('darwin'),
+      path1: other,
+      path2,
+      gameName: 'Override',
+      useTimestampFolder: true,
+    },
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.gameName, 'Override');
+  assert.equal(fs.readFileSync(path.join(path2, result.snapshotName, 'other.dat'), 'utf8'), 'x');
+  assert.ok(!fs.existsSync(path.join(path2, result.snapshotName, 'save.dat')));
+  assert.equal(path1.includes('live'), true);
 });

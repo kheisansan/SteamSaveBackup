@@ -12,6 +12,7 @@ const EVENTS = [
   'settings:changed',
   'shortcuts:state',
   'ui:focus-section',
+  'ui:notice',
 ];
 
 contextBridge.exposeInMainWorld('api', {
@@ -25,17 +26,28 @@ contextBridge.exposeInMainWorld('api', {
   updateGame: (id, patch) => ipcRenderer.invoke('game:update', { id, patch }),
   removeGame: (gameId) => ipcRenderer.invoke('game:remove', gameId),
   setActiveGame: (gameId) => ipcRenderer.invoke('game:setActive', gameId),
+  reorderGames: (orderedIds, groupId) =>
+    ipcRenderer.invoke('game:reorder', groupId ? { orderedIds, groupId } : orderedIds),
+  duplicateGame: (gameId) => ipcRenderer.invoke('game:duplicate', gameId),
+  moveGame: (gameId, groupId, beforeId) =>
+    ipcRenderer.invoke('game:move', { gameId, groupId, beforeId }),
+
+  addGroup: (partial) => ipcRenderer.invoke('group:add', partial),
+  updateGroup: (id, patch) => ipcRenderer.invoke('group:update', { id, patch }),
+  removeGroup: (groupId) => ipcRenderer.invoke('group:remove', groupId),
+  reorderGroups: (orderedIds) => ipcRenderer.invoke('group:reorder', orderedIds),
 
   pickFolder: (options) => ipcRenderer.invoke('dialog:pickFolder', options),
   validatePath: (target) => ipcRenderer.invoke('path:validate', target),
   openPath: (target) => ipcRenderer.invoke('shell:open', target),
   openLog: () => ipcRenderer.invoke('shell:openLog'),
 
-  runJob: (direction) => ipcRenderer.invoke('job:run', direction),
+  runJob: (direction, gameId) =>
+    ipcRenderer.invoke('job:run', gameId ? { direction, gameId } : direction),
   cancelJob: () => ipcRenderer.invoke('job:cancel'),
   getJobStatus: () => ipcRenderer.invoke('job:status'),
 
-  listSnapshots: () => ipcRenderer.invoke('snapshots:list'),
+  listSnapshots: (gameId) => ipcRenderer.invoke('snapshots:list', gameId),
 
   buildAccelerator: (keyEvent) => ipcRenderer.invoke('accelerator:build', keyEvent),
   formatAccelerator: (accelerator) => ipcRenderer.invoke('accelerator:format', accelerator),

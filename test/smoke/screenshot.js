@@ -43,16 +43,30 @@ app.whenReady().then(async () => {
   fs.writeFileSync(path.join(path1, 'config', 'settings.ini'), 'volume=5');
   fs.mkdirSync(path2, { recursive: true });
 
-  await win.webContents.executeJavaScript(`window.api.updateSettings({
-    path1: ${JSON.stringify(path1)},
-    path2: ${JSON.stringify(path2)},
-    notifications: false,
-    confirmRestore: false
-  })`);
-  await win.webContents.executeJavaScript(`window.api.runJob('backup')`);
+  await win.webContents.executeJavaScript(`(async () => {
+    await window.api.resetSettings();
+    await window.api.updateSettings({
+      gameName: 'Smoke Game',
+      path1: ${JSON.stringify(path1)},
+      path2: ${JSON.stringify(path2)},
+      notifications: false,
+      confirmRestore: false
+    });
+    const current = await window.api.getSettings();
+    const game = current.settings.games[0];
+    if (game) {
+      await window.api.updateGame(game.id, {
+        shortcutBackup: 'Command+Alt+Shift+B',
+        shortcutRestore: 'Command+Alt+Shift+Z',
+      });
+      await window.api.duplicateGame(game.id);
+    }
+    await window.api.addGroup({ name: 'アーカイブ' });
+    await window.api.runJob('backup');
+  })()`);
   await wait(600);
 
-  for (const section of ['run', 'paths', 'shortcuts', 'behavior', 'snapshots', 'log']) {
+  for (const section of ['run', 'paths', 'behavior', 'snapshots', 'log']) {
     await win.webContents.executeJavaScript(
       `document.querySelector('.nav-item[data-section="${section}"]').click()`
     );

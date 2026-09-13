@@ -76,33 +76,41 @@ async function run() {
   }
   await wait(1200);
 
+  await win.webContents.executeJavaScript(`window.api.resetSettings()`);
+  await wait(400);
+
   const expected = process.platform === 'darwin' ? 'Command' : 'Super';
   details.registered = {
     backup: globalShortcut.isRegistered(`${expected}+Alt+Shift+A`),
     restore: globalShortcut.isRegistered(`${expected}+Alt+Shift+Z`),
   };
-  check(details.registered.backup, 'バックアップ用グローバルショートカットが未登録');
-  check(details.registered.restore, '復元用グローバルショートカットが未登録');
+  check(!details.registered.backup, '未設定なのにバックアップ用ショートカットが登録されている');
+  check(!details.registered.restore, '未設定なのに復元用ショートカットが登録されている');
 
   // ---- 2. 初期表示
   const dom = await win.webContents.executeJavaScript(`(() => ({
     title: document.title,
-    navItems: document.querySelectorAll('.nav-item').length,
-    backupKey: document.getElementById('btnBackupKey').textContent,
-    restoreKey: document.getElementById('btnRestoreKey').textContent,
+    navItems: [...document.querySelectorAll('.nav-item')].map((b) => b.dataset.section),
     excludes: document.getElementById('inputExcludes').value,
     keepSnapshots: document.getElementById('inputKeepSnapshots').value,
     concurrency: document.getElementById('inputConcurrency').value,
     version: document.getElementById('appVersion').textContent,
-    backupStatus: document.getElementById('statusKeyBackup').textContent,
+    runEmpty: Boolean(
+      document.querySelector('#runGroups .empty-row') || document.querySelector('#runGroups .group-empty')
+    ),
+    groupBlocks: document.querySelectorAll('#pathsGroups .group-block').length,
     logCount: document.querySelectorAll('#logList li').length,
-    hasApi: typeof window.api === 'object'
+    hasApi: typeof window.api === 'object',
+    hasShortcutTab: Boolean(document.querySelector('.nav-item[data-section="shortcuts"]'))
   }))()`);
   details.dom = dom;
 
   check(dom.hasApi, 'preload の window.api が公開されていない');
-  check(dom.navItems === 6, `ナビ項目数が想定外: ${dom.navItems}`);
-  check(dom.backupKey.length > 1, 'ショートカット表示が未反映');
+  check(dom.navItems.length === 5, `ナビ項目数が想定外: ${JSON.stringify(dom.navItems)}`);
+  check(!dom.hasShortcutTab, 'ショートカットタブが残っている');
+  check(dom.version === 'v1.2.5', `バージョン表示が想定外: ${dom.version}`);
+  check(dom.runEmpty === true, 'ピン留めが無いのに実行テーブルが空でない');
+  check(dom.groupBlocks === 1, `初期グループ数が想定外: ${dom.groupBlocks}`);
   check(dom.excludes.includes('.DS_Store'), '除外パターンの初期値が未反映');
   check(dom.logCount >= 1, '起動ログが表示されていない');
 
@@ -132,47 +140,118 @@ async function run() {
   check(backup.ok === true, `バックアップが失敗: ${backup.message || JSON.stringify(backup.report)}`);
   check(backup.gameName === 'Smoke Game', `ゲーム名が結果に無い: ${backup.gameName}`);
 
-  // ゲーム追加ボタン経由で2件目を作り、切替できること
+  // 追加ボタンは下書き行を出すだけ。名前を入れて初めて保存される
   const games = await win.webContents.executeJavaScript(`(async () => {
     document.querySelector('.nav-item[data-section="paths"]').click();
     await new Promise((r) => setTimeout(r, 200));
-    document.getElementById('btnAddGame').click();
-    await new Promise((r) => setTimeout(r, 800));
+    document.querySelector('.add-row-btn').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const beforeFill = await window.api.getSettings();
+    const nameInput = document.querySelector('input[data-game-id="_draft"][data-field="name"]');
+    if (!nameInput) return { missingDraft: true, beforeCount: beforeFill.settings.games.length };
+    nameInput.value = 'ゲーム2';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 500));
+    const mid = await window.api.getSettings();
+    nameInput.dispatchEvent(new Event('blur'));
+    await new Promise((r) => setTimeout(r, 500));
     const afterAdd = await window.api.getSettings();
-    const second = afterAdd.settings.games.find((g) => g.id === afterAdd.settings.activeGameId);
-    const first = afterAdd.settings.games.find((g) => g.id !== afterAdd.settings.activeGameId);
-    const back = await window.api.updateSettings({ activeGameId: first.id });
+    const names = afterAdd.settings.games.map((g) => g.name);
     return {
-      list: afterAdd.settings.games.map((g) => g.name),
-      addedName: second && second.name,
-      active: back.settings.gameName,
+      beforeCount: beforeFill.settings.games.length,
+      midCount: mid.settings.games.length,
+      list: names,
       count: afterAdd.settings.games.length,
-      selectCount: document.getElementById('selectGamePaths').options.length
+      pathRows: document.querySelectorAll('#pathsGroups tr[data-game-id]').length,
+      runRows: document.querySelectorAll('#runGroups tr:not(.empty-row)').length,
+      groups: afterAdd.settings.groups.length,
+      groupPinned: afterAdd.settings.groups[0] && afterAdd.settings.groups[0].pinned
     };
   })()`);
   details.games = games;
+  check(games.beforeCount === 1, `下書きだけでは保存されてしまう: ${games.beforeCount}`);
+  check(games.midCount === 1, `入力途中なのに自動保存されている: ${games.midCount}`);
   check(games.count === 2, `ゲーム数が想定外: ${games.count}`);
-  check(games.selectCount === 2, `セレクトの件数が想定外: ${games.selectCount}`);
-  check(/^ゲーム\d+$/.test(games.addedName || ''), `追加ゲーム名が想定外: ${games.addedName}`);
-  check(games.active === 'Smoke Game', `切替後のアクティブが想定外: ${games.active}`);
   check(games.list.includes('Smoke Game'), '元のゲームが一覧に無い');
+  check(games.list.includes('ゲーム2'), `追加ゲーム名が想定外: ${JSON.stringify(games.list)}`);
+  check(games.pathRows === 2, `経路テーブルの行数が想定外: ${games.pathRows}`);
+  check(games.groups === 1, `グループ数が想定外: ${games.groups}`);
+  check(games.groupPinned === true, '既定グループがピン留めされていない');
 
-  // Smoke Game に戻したあと経路表示が追従しているか
-  await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-section="paths"]').click()`);
+  // コピー・グループ移動・削除（確認ダイアログは API 経由で回避）
+  const organize = await win.webContents.executeJavaScript(`(async () => {
+    document.querySelector('.nav-item[data-section="paths"]').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const lastGroupDelete = [...document.querySelectorAll('.group-head .btn.danger')]
+      .find((b) => b.textContent === '削除');
+    const hasCopyBtn = [...document.querySelectorAll('.row-actions .btn')]
+      .some((b) => b.textContent === 'コピー');
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    const current = await window.api.getSettings();
+    const source = current.settings.games.find((g) => g.name === 'Smoke Game');
+    const duplicated = await window.api.duplicateGame(source.id);
+    const copy = duplicated.settings.games.find((g) => g.name === 'Smoke Game のコピー');
+    const addedGroup = await window.api.addGroup({ name: '移動先' });
+    const destId = addedGroup.settings.groups.find((g) => g.name === '移動先').id;
+    await new Promise((r) => setTimeout(r, 400));
+    const moveSelects = document.querySelectorAll('.move-select').length;
+    const wrap = document.querySelector('#pathsGroups .table-wrap');
+    const tableOverflow = wrap
+      ? { client: wrap.clientWidth, scroll: wrap.scrollWidth }
+      : { missing: true };
+    const moved = await window.api.moveGame(copy.id, destId, '');
+    const movedGame = moved.settings.games.find((g) => g.id === copy.id);
+    const removedGame = await window.api.removeGame(copy.id);
+    const removedGroup = await window.api.removeGroup(destId);
+    return {
+      lastGroupDeleteDisabled: Boolean(lastGroupDelete && lastGroupDelete.disabled),
+      hasCopyBtn,
+      copyName: copy && copy.name,
+      copyShortcut: copy && copy.shortcutBackup,
+      moveSelects,
+      movedGroupId: movedGame && movedGame.groupId,
+      destId,
+      leftoverNames: removedGroup.settings.games.map((g) => g.name).sort(),
+      leftoverGroups: removedGroup.settings.groups.map((g) => g.name),
+      afterCopyCount: duplicated.settings.games.length,
+      afterRemoveGameCount: removedGame.settings.games.length,
+      tableOverflow
+    };
+  })()`);
+  details.organize = organize;
+  check(organize.lastGroupDeleteDisabled === true, '最後のグループの削除が無効になっていない');
+  check(organize.hasCopyBtn === true, '経路のコピーボタンが無い');
+  check(organize.copyName === 'Smoke Game のコピー', `コピー名が想定外: ${organize.copyName}`);
+  check(organize.copyShortcut === '', 'コピーした経路にショートカットが残っている');
+  check(organize.moveSelects >= 1, 'グループ移動のセレクトが出ていない');
+  check(
+    organize.tableOverflow &&
+      !organize.tableOverflow.missing &&
+      organize.tableOverflow.scroll <= organize.tableOverflow.client + 1,
+    `既定幅なのに経路テーブルが横スクロールしている: ${JSON.stringify(organize.tableOverflow)}`
+  );
+  check(organize.movedGroupId === organize.destId, 'グループを跨いだ移動ができていない');
+  check(organize.afterCopyCount === 3, `コピー後の経路数が想定外: ${organize.afterCopyCount}`);
+  check(organize.afterRemoveGameCount === 2, `経路削除後の件数が想定外: ${organize.afterRemoveGameCount}`);
+  check(organize.leftoverGroups.length === 1, `グループ削除後の件数が想定外: ${JSON.stringify(organize.leftoverGroups)}`);
+  check(
+    JSON.stringify(organize.leftoverNames) === JSON.stringify(['Smoke Game', 'ゲーム2']),
+    `削除後に残った経路が想定外: ${JSON.stringify(organize.leftoverNames)}`
+  );
+
+  await win.webContents.executeJavaScript(`document.querySelector('.nav-item[data-section="run"]').click()`);
   await wait(400);
-  const pathStatus = await win.webContents.executeJavaScript(`({
-    path1: document.getElementById('statusPath1').textContent,
-    path2: document.getElementById('statusPath2').textContent,
-    runPath1: document.getElementById('runPath1').textContent,
-    gameName: document.getElementById('inputGameName').value,
-    selectCount: document.getElementById('selectGameRun').options.length
+  const runStatus = await win.webContents.executeJavaScript(`({
+    runRows: [...document.querySelectorAll('#runGroups tbody tr:not(.empty-row)')].map((tr) => tr.children[0] && tr.children[0].textContent),
+    path1: document.querySelector('#runGroups tbody tr:not(.empty-row) td:nth-child(2)') &&
+      document.querySelector('#runGroups tbody tr:not(.empty-row) td:nth-child(2)').textContent,
+    groupTitles: [...document.querySelectorAll('#runGroups .group-title')].map((el) => el.textContent)
   })`);
-  details.pathStatus = pathStatus;
-  check(pathStatus.path1.startsWith('OK:'), `経路1の状態表示が未更新: ${pathStatus.path1}`);
-  check(pathStatus.path2.startsWith('OK:'), `経路2の状態表示が未更新: ${pathStatus.path2}`);
-  check(pathStatus.runPath1 === fixture.path1, '実行タブの経路表示が未更新');
-  check(pathStatus.gameName === 'Smoke Game', `ゲーム名入力が未反映: ${pathStatus.gameName}`);
-  check(pathStatus.selectCount === 2, `ゲーム選択の件数が想定外: ${pathStatus.selectCount}`);
+  details.runStatus = runStatus;
+  check(runStatus.runRows.includes('Smoke Game'), `実行タブにピン留めゲームが無い: ${JSON.stringify(runStatus.runRows)}`);
+  check(!runStatus.runRows.includes('ゲーム2'), 'ピン留めしていないゲームが実行タブに出ている');
+  check(runStatus.path1 === fixture.path1, `実行タブのコピー元が未更新: ${runStatus.path1}`);
+  check(runStatus.groupTitles.length === 1, `実行タブのグループ数が想定外: ${JSON.stringify(runStatus.groupTitles)}`);
   check(
     /^\d{8}_\d{4}$/.test(backup.snapshotName || ''),
     `スナップショット名が仕様と違う: ${backup.snapshotName}`
@@ -188,15 +267,25 @@ async function run() {
 
   // ---- 4. スナップショット一覧の「復元元にする」で復元元を設定
   const picked = await win.webContents.executeJavaScript(`(async () => {
+    const current = await window.api.getSettings();
+    const smoke = current.settings.games.find((g) => g.name === 'Smoke Game');
+    if (smoke) await window.api.setActiveGame(smoke.id);
     document.querySelector('.nav-item[data-section="snapshots"]').click();
+    await new Promise((r) => setTimeout(r, 400));
+    const select = document.getElementById('selectSnapshotGame');
+    if (smoke) {
+      select.value = smoke.id;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     await new Promise((r) => setTimeout(r, 800));
     const button = [...document.querySelectorAll('#snapshotList .link-btn')]
       .find((b) => b.textContent === '復元元にする');
     if (!button) return { found: false };
     button.click();
     await new Promise((r) => setTimeout(r, 800));
-    const current = await window.api.getSettings();
-    return { found: true, restorePath: current.settings.restorePath };
+    const after = await window.api.getSettings();
+    const target = after.settings.games.find((g) => g.name === 'Smoke Game');
+    return { found: true, restorePath: target && target.restorePath };
   })()`);
   details.picked = picked;
 
@@ -208,7 +297,11 @@ async function run() {
   fs.writeFileSync(path.join(fixture.path1, 'save01.dat'), 'broken');
   fs.chmodSync(path.join(fixture.path1, 'save01.dat'), 0o444);
 
-  const restore = await win.webContents.executeJavaScript(`window.api.runJob('restore')`);
+  const restore = await win.webContents.executeJavaScript(`(async () => {
+    const current = await window.api.getSettings();
+    const smoke = current.settings.games.find((g) => g.name === 'Smoke Game');
+    return window.api.runJob('restore', smoke && smoke.id);
+  })()`);
   details.restore = {
     ok: restore.ok,
     snapshotName: restore.snapshotName,
@@ -237,23 +330,81 @@ async function run() {
     '経路1に日時フォルダが作られてしまっている'
   );
 
-  // ---- 6. ショートカット変更が反映されるか
+  // ---- 5b. 経路が無い／存在しないときは経路設定タブ＋エラー通知
+  const pathError = await win.webContents.executeJavaScript(`(async () => {
+    const current = await window.api.getSettings();
+    const smoke = current.settings.games.find((g) => g.name === 'Smoke Game');
+    document.querySelector('.nav-item[data-section="run"]').click();
+    await new Promise((r) => setTimeout(r, 200));
+    await window.api.updateGame(smoke.id, { path1: '' });
+    const emptyRun = await window.api.runJob('backup', smoke.id);
+    await new Promise((r) => setTimeout(r, 300));
+    const emptyUi = {
+      ok: emptyRun.ok,
+      message: emptyRun.message,
+      pathsActive: document.getElementById('section-paths').classList.contains('is-active'),
+      toast: document.getElementById('toast').textContent,
+      toastShown: document.getElementById('toast').classList.contains('is-show'),
+      alert: document.getElementById('pathsAlert') && document.getElementById('pathsAlert').textContent
+    };
+    const missingPath = ${JSON.stringify(path.join('/tmp', 'ssb-missing-path-does-not-exist'))};
+    await window.api.updateGame(smoke.id, { path1: missingPath });
+    document.querySelector('.nav-item[data-section="run"]').click();
+    await new Promise((r) => setTimeout(r, 200));
+    const missingRun = await window.api.runJob('backup', smoke.id);
+    await new Promise((r) => setTimeout(r, 300));
+    const missingUi = {
+      ok: missingRun.ok,
+      message: missingRun.message,
+      pathsActive: document.getElementById('section-paths').classList.contains('is-active'),
+      toast: document.getElementById('toast').textContent,
+      toastShown: document.getElementById('toast').classList.contains('is-show'),
+      alert: document.getElementById('pathsAlert') && document.getElementById('pathsAlert').textContent
+    };
+    await window.api.updateGame(smoke.id, { path1: ${JSON.stringify(fixture.path1)} });
+    return { emptyUi, missing: missingUi };
+  })()`);
+  details.pathError = pathError;
+  check(pathError.emptyUi.ok === false, '未設定の経路でもバックアップが通ってしまう');
+  check(/コピー元を設定/.test(pathError.emptyUi.message || ''), `未設定時のメッセージが想定外: ${pathError.emptyUi.message}`);
+  check(pathError.emptyUi.pathsActive === true, '未設定時に経路設定タブへ切り替わっていない');
+  check(pathError.emptyUi.toastShown === true, '未設定時にエラー通知が出ていない');
+  check(pathError.emptyUi.toast === pathError.emptyUi.message, '未設定時のトースト内容がメッセージと違う');
+  check(pathError.emptyUi.alert === pathError.emptyUi.message, '未設定時の経路設定アラートが出ていない');
+  check(pathError.missing.ok === false, '存在しない経路でもバックアップが通ってしまう');
+  check(/見つかりません/.test(pathError.missing.message || ''), `不存在時のメッセージが想定外: ${pathError.missing.message}`);
+  check(pathError.missing.pathsActive === true, '不存在時に経路設定タブへ切り替わっていない');
+  check(pathError.missing.toastShown === true, '不存在時にエラー通知が出ていない');
+
+  // ---- 6. ゲーム別ショートカット変更が反映されるか
   const changed = await win.webContents.executeJavaScript(`(async () => {
     const built = await window.api.buildAccelerator({
       code: 'KeyB', key: 'b', metaKey: true, ctrlKey: false, altKey: true, shiftKey: true
     });
-    const saved = await window.api.updateSettings({ shortcutBackup: built.accelerator });
-    return { built, shortcuts: saved.shortcuts };
+    const current = await window.api.getSettings();
+    const target = current.settings.games.find((g) => g.name === 'Smoke Game') || current.settings.games[0];
+    const restoreBuilt = await window.api.buildAccelerator({
+      code: 'KeyZ', key: 'z', metaKey: true, ctrlKey: false, altKey: true, shiftKey: true
+    });
+    const saved = await window.api.updateGame(target.id, {
+      shortcutBackup: built.accelerator,
+      shortcutRestore: restoreBuilt.accelerator
+    });
+    return {
+      built,
+      restoreBuilt,
+      game: saved.settings.games.find((g) => g.id === target.id)
+    };
   })()`);
   details.shortcutChange = changed;
 
   const newAccel = process.platform === 'darwin' ? 'Command+Alt+Shift+B' : 'Super+Alt+Shift+B';
+  const restoreAccel = process.platform === 'darwin' ? 'Command+Alt+Shift+Z' : 'Super+Alt+Shift+Z';
   check(changed.built.accelerator === newAccel, `生成されたショートカットが想定外: ${changed.built.accelerator}`);
-  check(globalShortcut.isRegistered(newAccel), '変更後のショートカットが登録されていない');
-  check(
-    !globalShortcut.isRegistered(`${expected}+Alt+Shift+A`),
-    '変更前のショートカットが解除されていない'
-  );
+  check(changed.game && changed.game.shortcutBackup === newAccel, 'バックアップ用ショートカットが保存されていない');
+  check(changed.game && changed.game.shortcutRestore === restoreAccel, '復元用ショートカットが保存されていない');
+  check(globalShortcut.isRegistered(newAccel), '変更後のバックアップ用ショートカットが登録されていない');
+  check(globalShortcut.isRegistered(restoreAccel), '復元用ショートカットが登録されていない');
 
   // ---- 7. スナップショット一覧
   const snapshots = await win.webContents.executeJavaScript(`window.api.listSnapshots()`);
