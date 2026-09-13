@@ -4,8 +4,8 @@
  * コピー処理の実行管理。
  * Electron に依存しないので単体テストで直接叩ける。
  * direction:
- *   'backup'  = 経路1 -> 経路2/yyyymmdd_hhMM
- *   'restore' = 復元元フォルダ -> 経路1（日時フォルダを作らず強制上書き）
+ *   'backup'  = コピー元 -> バックアップ先/yyyymmdd_hhMM
+ *   'restore' = 復元元フォルダ -> コピー元（日時フォルダを作らず強制上書き）
  */
 
 const fs = require('node:fs');
@@ -20,8 +20,8 @@ const { formatStamp, uniqueSnapshotName } = require('./timestamp');
 const { pruneSnapshots } = require('./snapshots');
 
 const DIRECTION_LABEL = {
-  backup: '経路1 → 経路2',
-  restore: '復元元 → 経路1',
+  backup: 'コピー元 → バックアップ先',
+  restore: '復元元 → コピー元',
 };
 
 class JobError extends Error {}
@@ -44,6 +44,44 @@ async function assertDirectory(target, label) {
   }
 }
 
+function inspectDirectory(target, label) {
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch (err) {
+    if (err.code === 'ENOENT') return `${label}が見つかりません: ${target}`;
+    if (err.code === 'EACCES' || err.code === 'EPERM') {
+      return `${label}へのアクセスが拒否されました: ${target}`;
+    }
+    return `${label}を確認できません(${err.code || err.message}): ${target}`;
+  }
+  if (!stat.isDirectory()) return `${label}がフォルダではありません: ${target}`;
+  return null;
+}
+
+/**
+ * 実行前に経路の不足・不存在・危険な組み合わせを説明する。
+ * 問題がなければ null。
+ */
+function inspectJobSetup(direction, settings) {
+  const s = settings || {};
+  if (direction === 'backup') {
+    if (!s.path1) return 'コピー元を設定してください。';
+    if (!s.path2) return 'バックアップ先を設定してください。';
+    const pair = validateCopyPair(s.path1, s.path2);
+    if (!pair.ok) return pair.error;
+    return inspectDirectory(s.path1, 'コピー元');
+  }
+  if (direction === 'restore') {
+    if (!s.restorePath) return '復元元フォルダを設定してください。';
+    if (!s.path1) return 'コピー元を設定してください。';
+    const pair = validateCopyPair(s.restorePath, s.path1);
+    if (!pair.ok) return pair.error;
+    return inspectDirectory(s.restorePath, 'コピー元(復元元フォルダ)');
+  }
+  return `不明な方向指定です: ${direction}`;
+}
+
 /**
  * 実行対象のコピー元/先を決める。
  * @returns {Promise<{src:string,dest:string,snapshotName:string|null}>}
@@ -55,7 +93,7 @@ async function resolveEndpoints(direction, settings) {
     const pair = validateCopyPair(path1, path2);
     if (!pair.ok) throw new JobError(pair.error);
 
-    await assertDirectory(path1, 'コピー元(経路1)');
+    await assertDirectory(path1, 'コピー元');
     await fsp.mkdir(path2, { recursive: true });
     if (!useTimestampFolder) return { src: path1, dest: path2, snapshotName: null };
     const name = uniqueSnapshotName(formatStamp(), (candidate) =>
@@ -71,7 +109,7 @@ async function resolveEndpoints(direction, settings) {
 
     await assertDirectory(restorePath, 'コピー元(復元元フォルダ)');
     await fsp.mkdir(path1, { recursive: true });
-    // 復元では日時フォルダを作らず、復元元の中身をそのまま経路1へ展開する
+    // 復元では日時フォルダを作らず、復元元の中身をそのままコピー元へ展開する
     return { src: restorePath, dest: path1, snapshotName: null };
   }
 
@@ -98,7 +136,7 @@ class JobRunner extends EventEmitter {
    * コピーを実行する。多重起動は拒否する。
    * @param {'backup'|'restore'} direction
    */
-  async run(direction, { trigger = 'manual' } = {}) {
+  async run(direction, { trigger = 'manual', settings: override } = {}) {
     if (this.busy) {
       const busyResult = {
         ok: false,
@@ -109,7 +147,7 @@ class JobRunner extends EventEmitter {
       return busyResult;
     }
 
-    const settings = this.getSettings();
+    const settings = override || this.getSettings();
     this.current = direction;
     this.controller = new AbortController();
 
@@ -184,6 +222,7 @@ class JobRunner extends EventEmitter {
         startedAt: startedAt.toISOString(),
         finishedAt: new Date().toISOString(),
         message: err.message,
+        setupError: err instanceof JobError,
       };
       this.emit('failed', result);
       return result;
@@ -194,4 +233,4 @@ class JobRunner extends EventEmitter {
   }
 }
 
-module.exports = { JobRunner, JobError, resolveEndpoints, DIRECTION_LABEL };
+module.exports = { JobRunner, JobError, resolveEndpoints, inspectJobSetup, DIRECTION_LABEL };
