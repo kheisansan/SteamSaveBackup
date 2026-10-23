@@ -1,7 +1,7 @@
 {
   "name": "steam-save-backup",
   "productName": "SteamSaveBackup",
-    "version": "1.2.6",
+    "version": "1.2.7",
   "description": "ゲーム別・グループ別に経路を設定し、グローバルショートカットでセーブデータを丸ごとコピーする常駐アプリ",
   "main": "src/main/main.js",
   "author": "kei",
@@ -15,6 +15,9 @@
     "smoke": "node scripts/run-electron.js test/smoke/entry.js --hidden --user-data-dir=.tmp-smoke",
     "screenshot": "node scripts/run-electron.js test/smoke/screenshot.js --user-data-dir=.tmp-smoke",
     "prebuild": "node scripts/generate-icons.js",
+    "prebuild:mac": "node scripts/generate-icons.js",
+    "prebuild:win": "node scripts/generate-icons.js",
+    "prepack": "node scripts/generate-icons.js",
     "build": "electron-builder --mac --win",
     "build:mac": "electron-builder --mac",
     "build:win": "electron-builder --win",
