@@ -1,7 +1,7 @@
 {
   "name": "steam-save-backup",
   "productName": "SteamSaveBackup",
-    "version": "1.2.5",
+    "version": "1.2.6",
   "description": "ゲーム別・グループ別に経路を設定し、グローバルショートカットでセーブデータを丸ごとコピーする常駐アプリ",
   "main": "src/main/main.js",
   "author": "kei",

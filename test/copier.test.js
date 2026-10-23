@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { copyTree, scanTree } = require('../src/core/copier');
+const { copyTree, scanTree, resolveEntryKind } = require('../src/core/copier');
 const { createExcluder } = require('../src/core/patterns');
 const { makeTmpDir, writeTree, readTree } = require('./helpers');
 
@@ -119,6 +119,36 @@ test('シンボリックリンクは辿らずリンクとして再作成する',
 
   assert.equal(report.symlinks, 1);
   assert.ok(fs.lstatSync(path.join(dest, 'loop')).isSymbolicLink());
+});
+
+test('Dirent がシンボリックリンクと誤判定しても通常ファイルとして扱う(SMB/UNC対策)', async () => {
+  const dir = makeTmpDir();
+  const file = path.join(dir, 'DRAKS0005.sl2');
+  fs.writeFileSync(file, 'save-data');
+
+  // SMB 上で起きうる誤判定を模擬: isSymbolicLink=true だが実体は通常ファイル
+  const fakeDirent = {
+    name: 'DRAKS0005.sl2',
+    isSymbolicLink: () => true,
+    isDirectory: () => false,
+    isFile: () => false,
+  };
+
+  const resolved = await resolveEntryKind(file, fakeDirent);
+  assert.equal(resolved.kind, 'file');
+  assert.equal(resolved.size, Buffer.byteLength('save-data'));
+
+  const src = writeTree(path.join(makeTmpDir(), 'src'), {
+    'DRAKS0005.sl2': 'save-data',
+    'steam_autocloud.vdf': 'vdf',
+  });
+  const dest = path.join(makeTmpDir(), 'dest');
+  const report = await copyTree(src, dest);
+
+  assert.equal(report.errorCount, 0, JSON.stringify(report.errors));
+  assert.equal(report.copiedFiles, 2);
+  assert.equal(report.symlinks, 0);
+  assert.equal(fs.readFileSync(path.join(dest, 'DRAKS0005.sl2'), 'utf8'), 'save-data');
 });
 
 test('AbortSignal でキャンセルできる', async () => {

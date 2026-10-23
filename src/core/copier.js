@@ -5,6 +5,7 @@
  * - 進捗通知つき(走査 -> コピーの2フェーズ)
  * - 1ファイル失敗しても止めずに続行し、最後にまとめて報告
  * - シンボリックリンクは辿らず、リンクとして再作成(ループ防止)
+ * - SMB/UNC でのシンボリックリンク誤判定は通常ファイルとしてコピーする
  */
 
 const fs = require('node:fs');
@@ -25,6 +26,49 @@ class CanceledError extends Error {
 
 function throwIfAborted(signal) {
   if (signal && signal.aborted) throw new CanceledError();
+}
+
+/**
+ * Dirent の種別を確定する。
+ * Windows の SMB/UNC では `isSymbolicLink()` が通常ファイルに対して true になることがあり、
+ * そのまま readlink すると EINVAL になる。リンク候補は lstat + readlink で再確認する。
+ * @returns {Promise<{kind:'dir'|'file'|'link'|'other'|'error', size?:number, mtimeMs?:number, message?:string}>}
+ */
+async function resolveEntryKind(abs, entry) {
+  const asFile = (stat) => ({ kind: 'file', size: stat.size, mtimeMs: stat.mtimeMs });
+
+  if (!entry.isSymbolicLink()) {
+    if (entry.isDirectory()) return { kind: 'dir' };
+    if (entry.isFile()) {
+      try {
+        return asFile(await fsp.lstat(abs));
+      } catch (err) {
+        return { kind: 'error', message: err.message };
+      }
+    }
+    return { kind: 'other' };
+  }
+
+  let stat;
+  try {
+    stat = await fsp.lstat(abs);
+  } catch (err) {
+    return { kind: 'error', message: err.message };
+  }
+
+  if (stat.isSymbolicLink()) {
+    try {
+      await fsp.readlink(abs);
+      return { kind: 'link' };
+    } catch {
+      // EINVAL 等: リンクではない reparse point / SMB 誤判定 → 中身を通常コピーする
+      if (stat.isDirectory()) return { kind: 'dir' };
+      return asFile(stat);
+    }
+  }
+  if (stat.isDirectory()) return { kind: 'dir' };
+  if (stat.isFile()) return asFile(stat);
+  return { kind: 'other' };
 }
 
 /**
@@ -54,24 +98,21 @@ async function scanTree(root, { exclude, signal, onCount } = {}) {
 
     for (const entry of entries) {
       const childRel = rel === '' ? entry.name : path.join(rel, entry.name);
-      const isDir = entry.isDirectory() && !entry.isSymbolicLink();
+      const absChild = path.join(root, childRel);
+      const resolved = await resolveEntryKind(absChild, entry);
+      const isDir = resolved.kind === 'dir';
       if (exclude && exclude(childRel, isDir)) continue;
 
-      if (entry.isSymbolicLink()) {
+      if (resolved.kind === 'error') {
+        errors.push({ path: absChild, message: resolved.message });
+      } else if (resolved.kind === 'link') {
         links.push({ rel: childRel });
-      } else if (entry.isDirectory()) {
+      } else if (resolved.kind === 'dir') {
         dirs.push(childRel);
         stack.push(childRel);
-      } else if (entry.isFile()) {
-        let stat;
-        try {
-          stat = await fsp.lstat(path.join(root, childRel));
-        } catch (err) {
-          errors.push({ path: path.join(root, childRel), message: err.message });
-          continue;
-        }
-        files.push({ rel: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
-        totalBytes += stat.size;
+      } else if (resolved.kind === 'file') {
+        files.push({ rel: childRel, size: resolved.size, mtimeMs: resolved.mtimeMs });
+        totalBytes += resolved.size;
       }
       // FIFO/デバイス等の特殊ファイルは対象外
     }
@@ -124,10 +165,27 @@ async function copyOneFile(srcFile, destFile, srcMeta, skipUnchanged) {
   return 'copied';
 }
 
+/** @returns {Promise<'link'|'file'>} */
 async function recreateSymlink(srcLink, destLink) {
-  const target = await fsp.readlink(srcLink);
-  await fsp.rm(destLink, { force: true, recursive: true });
-  await fsp.symlink(target, destLink);
+  try {
+    const target = await fsp.readlink(srcLink);
+    await fsp.rm(destLink, { force: true, recursive: true });
+    await fsp.symlink(target, destLink);
+    return 'link';
+  } catch (err) {
+    // 走査時の誤判定が残った場合の保険: 通常ファイルとしてコピーする
+    if (err.code === 'EINVAL' || err.code === 'UNKNOWN') {
+      const stat = await fsp.lstat(srcLink);
+      await fsp.copyFile(srcLink, destLink);
+      try {
+        await fsp.utimes(destLink, new Date(), new Date(stat.mtimeMs));
+      } catch {
+        /* SMB共有等では失敗し得るが致命的ではない */
+      }
+      return 'file';
+    }
+    throw err;
+  }
 }
 
 /**
@@ -243,8 +301,9 @@ async function copyTree(src, dest, options = {}) {
     for (const link of scan.links) {
       throwIfAborted(signal);
       try {
-        await recreateSymlink(path.join(src, link.rel), path.join(dest, link.rel));
-        report.symlinks += 1;
+        const result = await recreateSymlink(path.join(src, link.rel), path.join(dest, link.rel));
+        if (result === 'link') report.symlinks += 1;
+        else report.copiedFiles += 1;
       } catch (err) {
         addError(path.join(src, link.rel), err.message);
       }
@@ -264,4 +323,4 @@ async function copyTree(src, dest, options = {}) {
   return report;
 }
 
-module.exports = { copyTree, scanTree, CanceledError, MTIME_TOLERANCE_MS };
+module.exports = { copyTree, scanTree, resolveEntryKind, CanceledError, MTIME_TOLERANCE_MS };

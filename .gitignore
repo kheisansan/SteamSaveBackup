@@ -1,4 +1,5 @@
 node_modules/
+.tools/
 dist/
 build/icon.png
 build/tray.png
